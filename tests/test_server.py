@@ -115,8 +115,12 @@ async def test_build_gateway_defaults_to_paper_on_public_prices(tmp_path):
 _IRL_VARS = ("IRL_BASE_URL", "IRL_API_TOKEN", "IRL_AGENT_ID", "IRL_MODEL_HASH")
 
 
+_CONFIG_PREFIXES = ("IRL_", "GATEWAY_", "EXCHANGE_", "AGENT_", "PAPER_")
+
+
 def _clean_env(home: Path) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if k not in _IRL_VARS}
+    # No gateway configuration leaks in from the developer's or CI's shell.
+    env = {k: v for k, v in os.environ.items() if not k.startswith(_CONFIG_PREFIXES)}
     env.update(
         IRL_GATEWAY_HOME=str(home),
         HOME=str(home),

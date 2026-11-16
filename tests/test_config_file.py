@@ -144,9 +144,56 @@ def test_unreadable_agent_json_is_a_config_error(tmp_path):
         resolve_env({"IRL_GATEWAY_HOME": str(tmp_path)})
 
 
+def test_permission_denied_on_agent_json_is_a_config_error(tmp_path, monkeypatch):
+    path = _write(tmp_path, {"env": FILE_ENV})
+    real_stat = Path.stat
+
+    def stat(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError(13, "Permission denied")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+
+    with pytest.raises(ConfigError, match="could not read") as info:
+        resolve_env({"IRL_GATEWAY_HOME": str(tmp_path)})
+    assert not isinstance(info.value, NotConfiguredError)
+
+
+ME = 1000
+
+
+@pytest.mark.parametrize(
+    "mode, uid, problem",
+    [
+        (0o600, ME, None),
+        (0o644, ME, None),  # readable by others: a warning, not a refusal
+        (0o620, ME, "writable by other users"),
+        (0o602, ME, "writable by other users"),
+        (0o600, 0, "owned by another user"),
+    ],
+)
+def test_unsafe_reason(mode, uid, problem):
+    assert config._unsafe_reason(mode, uid, ME) == problem
+
+
+@pytest.mark.parametrize("mode, shared", [(0o600, False), (0o640, True), (0o604, True)])
+def test_readable_by_others(mode, shared):
+    assert config._readable_by_others(mode) is shared
+
+
+def test_unsafe_file_is_refused_without_revealing_the_token(tmp_path, monkeypatch):
+    _write(tmp_path, {"env": FILE_ENV})
+    monkeypatch.setattr(config, "_posix_owner_mode", lambda _path: (0o666, ME, ME))
+
+    with pytest.raises(ConfigError, match="writable by other users") as info:
+        resolve_env({"IRL_GATEWAY_HOME": str(tmp_path)})
+    assert TOKEN not in str(info.value)
+
+
 def test_shared_file_warns_without_revealing_the_token(tmp_path, monkeypatch):
     _write(tmp_path, {"env": FILE_ENV})
-    monkeypatch.setattr(config, "_readable_by_others", lambda _path: True)
+    monkeypatch.setattr(config, "_posix_owner_mode", lambda _path: (0o644, ME, ME))
     warnings: list[str] = []
 
     resolve_env({"IRL_GATEWAY_HOME": str(tmp_path)}, warn=warnings.append)
@@ -157,17 +204,24 @@ def test_shared_file_warns_without_revealing_the_token(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
-def test_posix_permission_check(tmp_path):
+def test_posix_permissions_end_to_end(tmp_path):
     path = _write(tmp_path, {"env": FILE_ENV})
-    assert config._readable_by_others(path) is False
+    env = {"IRL_GATEWAY_HOME": str(tmp_path)}
+    warnings: list[str] = []
+
+    resolve_env(env, warn=warnings.append)
+    assert warnings == []
     path.chmod(0o644)
-    assert config._readable_by_others(path) is True
+    resolve_env(env, warn=warnings.append)
+    assert len(warnings) == 1
+    path.chmod(0o664)
+    with pytest.raises(ConfigError, match="writable by other users"):
+        resolve_env(env)
 
 
-def test_non_posix_permission_check_is_skipped(tmp_path, monkeypatch):
-    path = _write(tmp_path, {"env": FILE_ENV})
-    monkeypatch.setattr(config, "_IS_POSIX", False)
-    assert config._readable_by_others(path) is False
+@pytest.mark.skipif(os.name == "posix", reason="Windows has no POSIX owner/mode check")
+def test_no_posix_check_on_windows(tmp_path):
+    assert config._posix_owner_mode(_write(tmp_path, {"env": FILE_ENV})) is None
 
 
 def test_gateway_home_defaults_to_the_user_home(monkeypatch):

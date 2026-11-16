@@ -7,6 +7,7 @@ import json
 import os
 import stat
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -118,10 +119,16 @@ def test_init_output_survives_a_cp1252_stdout(tmp_path, monkeypatch):
     assert "mcpServers" in _captured(stream)
 
 
-def test_init_messages_are_ascii(tmp_path):
+def test_init_messages_are_ascii(tmp_path, monkeypatch):
+    # The temp dir (and the user's name in it) may not be ASCII: judge only
+    # the messages, with the home path taken out.
+    monkeypatch.setenv("PATH", "")
+    home = tmp_path / "home"
     lines: list[str] = []
-    run_init(["--home", str(tmp_path)], post=_uuid_server(), out=lines.append)
-    assert "\n".join(lines).isascii()
+
+    run_init(["--home", str(home)], post=_uuid_server(), out=lines.append)
+
+    assert "\n".join(lines).replace(str(home), "<home>").isascii()
 
 
 def test_main_survives_non_ascii_input_on_a_cp1252_stdout(tmp_path, monkeypatch):
@@ -170,17 +177,75 @@ def test_init_is_idempotent_when_agent_json_is_valid(tmp_path):
     assert "tok-123" not in text
 
 
-def test_force_creates_a_new_agent_and_keeps_a_backup(tmp_path):
+def _backups(home) -> list:
+    return sorted(home.glob("agent.json.*.bak"))
+
+
+def test_force_creates_a_new_agent_and_keeps_every_previous_token(tmp_path):
     run_init(["--home", str(tmp_path)], post=_uuid_server(), out=lambda _: None)
-    before = (tmp_path / "agent.json").read_text()
+    first = (tmp_path / "agent.json").read_text()
     again = _uuid_server()
 
     rc = run_init(["--home", str(tmp_path), "--force"], post=again, out=lambda _: None)
+    second = (tmp_path / "agent.json").read_text()
+    run_init(["--home", str(tmp_path), "--force"], post=_uuid_server(), out=lambda _: None)
 
     assert rc == 0
     assert len(again.calls) == 2
-    assert (tmp_path / "agent.json.bak").read_text() == before
-    assert (tmp_path / "agent.json").read_text() != before
+    assert second != first
+    backups = _backups(tmp_path)
+    assert len(backups) == 2  # two --force runs don't overwrite each other
+    assert {b.read_text() for b in backups} == {first, second}
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_a_failed_save_leaves_the_previous_agent_json_intact(tmp_path, monkeypatch):
+    run_init(["--home", str(tmp_path)], post=_uuid_server(), out=lambda _: None)
+    before = (tmp_path / "agent.json").read_text()
+    real_replace = os.replace
+
+    def failing_replace(src, dst):
+        if str(src).endswith(".tmp"):
+            raise OSError(28, "No space left on device")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(init_module.os, "replace", failing_replace)
+
+    with pytest.raises(InitError, match="could not save"):
+        run_init(["--home", str(tmp_path), "--force"], post=_uuid_server(), out=lambda _: None)
+
+    assert (tmp_path / "agent.json").read_text() == before
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_init_uses_irl_gateway_home_when_no_home_is_given(tmp_path, monkeypatch):
+    home = tmp_path / "gw-home"
+    monkeypatch.setenv("IRL_GATEWAY_HOME", str(home))
+    lines: list[str] = []
+
+    run_init([], post=_uuid_server(), out=lines.append)
+
+    assert (home / "agent.json").exists()
+    assert _mcp_block(lines)["mcpServers"]["irl-gateway"]["env"] == {
+        "IRL_GATEWAY_HOME": str(home)
+    }
+
+
+def test_existence_check_permission_error_is_an_init_error(tmp_path, monkeypatch):
+    saved = tmp_path / "agent.json"
+    real_stat = Path.stat
+
+    def stat_(self, *args, **kwargs):
+        if self == saved:
+            raise PermissionError(13, "Permission denied")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat_)
+    server = _uuid_server()
+
+    with pytest.raises(InitError, match="could not read"):
+        run_init(["--home", str(tmp_path)], post=server, out=lambda _: None)
+    assert server.calls == []
 
 
 def test_an_invalid_agent_json_is_not_overwritten_without_force(tmp_path):
@@ -206,26 +271,54 @@ def _mcp_block(lines: list[str]) -> dict:
     return json.loads(text[text.index("{") : text.rindex("}") + 1])
 
 
+def _fake_uvx(directory: Path) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    exe = directory / ("uvx.exe" if sys.platform == "win32" else "uvx")
+    exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    exe.chmod(0o755)
+    return exe
+
+
 def test_mcp_config_uses_the_absolute_uvx_path(tmp_path, monkeypatch):
-    uvx = str(tmp_path / "bin" / "uvx")
-    monkeypatch.setattr(init_module.shutil, "which", lambda name: uvx if name == "uvx" else None)
-    monkeypatch.setattr(init_module, "_default_home", lambda: tmp_path)
+    real = _fake_uvx(tmp_path / "bin")
+    monkeypatch.setenv("PATH", str(real.parent))
+    monkeypatch.setattr(init_module, "_default_home", lambda: tmp_path / "home")
     lines: list[str] = []
 
-    run_init(["--home", str(tmp_path)], post=_uuid_server(), out=lines.append)
+    run_init(["--home", str(tmp_path / "home")], post=_uuid_server(), out=lines.append)
 
     entry = _mcp_block(lines)["mcpServers"]["irl-gateway"]
-    assert entry == {"command": uvx, "args": ["irl-gateway"]}
+    assert entry == {"command": str(real), "args": ["irl-gateway"]}
 
 
-def test_mcp_config_falls_back_to_bare_uvx(tmp_path, monkeypatch):
-    monkeypatch.setattr(init_module.shutil, "which", lambda name: None)
+def test_a_uvx_planted_in_the_cwd_is_never_printed(tmp_path, monkeypatch):
+    cwd = tmp_path / "untrusted"
+    _fake_uvx(cwd)
+    real = _fake_uvx(tmp_path / "bin")
+    monkeypatch.chdir(cwd)
+    # cwd first via every spelling a PATH can carry it, then the real one.
+    entries = ["", ".", "untrusted", str(cwd), str(real.parent)]
+    monkeypatch.setenv("PATH", os.pathsep.join(entries))
     lines: list[str] = []
 
-    run_init(["--home", str(tmp_path)], post=_uuid_server(), out=lines.append)
+    run_init(["--home", str(tmp_path / "home")], post=_uuid_server(), out=lines.append)
+
+    assert _mcp_block(lines)["mcpServers"]["irl-gateway"]["command"] == str(real)
+
+
+def test_only_an_untrusted_uvx_falls_back_to_bare_uvx_with_a_warning(tmp_path, monkeypatch):
+    cwd = tmp_path / "untrusted"
+    _fake_uvx(cwd)
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("PATH", os.pathsep.join(["", ".", str(cwd)]))
+    lines: list[str] = []
+
+    run_init(["--home", str(tmp_path / "home")], post=_uuid_server(), out=lines.append)
 
     entry = _mcp_block(lines)["mcpServers"]["irl-gateway"]
     assert entry["command"] == "uvx"
+    text = "\n".join(lines)
+    assert "Warning" in text and "absolute path" in text
     # A non-default home has to reach the server, or it won't find agent.json.
-    assert entry["env"] == {"IRL_GATEWAY_HOME": str(tmp_path)}
-    assert f"IRL_GATEWAY_HOME={tmp_path}" in "\n".join(lines)
+    assert entry["env"] == {"IRL_GATEWAY_HOME": str(tmp_path / "home")}
+    assert "IRL_GATEWAY_HOME=" in text
