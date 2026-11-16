@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import io
 import json
+import os
+import stat
+import sys
 
 import pytest
 
+from irl_gateway import init as init_module
 from irl_gateway.init import InitError, run_init
+from irl_gateway.init import main as init_main
 
 
 class FakeServer:
@@ -79,3 +85,147 @@ def test_init_rejects_malformed_assets(tmp_path):
         run_init(
             ["--assets", "BTCUSDT", "--home", str(tmp_path)], post=FakeServer(), out=lambda _: None
         )
+
+
+# ---- robust output, idempotence, uvx path --------------------------------------
+
+AGENT_UUID = "ff6cb58a-90ff-424e-a67f-fa6f626fe44b"
+
+
+def _uuid_server() -> FakeServer:
+    return FakeServer(register=(201, {"agent_id": AGENT_UUID, "status": "Active"}))
+
+
+def _cp1252_stdout(monkeypatch) -> io.TextIOWrapper:
+    # What Windows gives a redirected/piped stdout when PYTHONIOENCODING is unset.
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+    monkeypatch.setattr(sys, "stdout", stream)
+    return stream
+
+
+def _captured(stream: io.TextIOWrapper) -> str:
+    stream.flush()
+    return stream.buffer.getvalue().decode("cp1252")
+
+
+def test_init_output_survives_a_cp1252_stdout(tmp_path, monkeypatch):
+    # Reproduces the funnel crash: UnicodeEncodeError on '\u2713' after signup.
+    stream = _cp1252_stdout(monkeypatch)
+
+    rc = run_init(["--home", str(tmp_path)], post=_uuid_server(), out=print)
+
+    assert rc == 0
+    assert "mcpServers" in _captured(stream)
+
+
+def test_init_messages_are_ascii(tmp_path):
+    lines: list[str] = []
+    run_init(["--home", str(tmp_path)], post=_uuid_server(), out=lines.append)
+    assert "\n".join(lines).isascii()
+
+
+def test_main_survives_non_ascii_input_on_a_cp1252_stdout(tmp_path, monkeypatch):
+    stream = _cp1252_stdout(monkeypatch)
+    home = tmp_path / "\u65e5\u672c"  # a home path cp1252 can't encode
+
+    rc = init_main(["--home", str(home), "--name", "bot-\u2713"], post=_uuid_server())
+
+    assert rc == 0
+    assert "mcpServers" in _captured(stream)
+    assert (home / "agent.json").exists()
+
+
+def test_main_reports_init_errors_on_stderr(tmp_path, capsys):
+    server = FakeServer(signup=(429, {"message": "try again tomorrow"}))
+
+    rc = init_main(["--home", str(tmp_path)], post=server)
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "try again tomorrow" in captured.err and captured.out == ""
+
+
+def test_saved_credentials_come_first_and_the_mcp_config_has_no_token(tmp_path):
+    lines: list[str] = []
+
+    run_init(["--home", str(tmp_path)], post=_uuid_server(), out=lines.append)
+
+    assert lines[0].startswith("Saved to ") and str(tmp_path / "agent.json") in lines[0]
+    assert "tok-123" not in "\n".join(lines)  # the token stays in agent.json
+
+
+def test_init_is_idempotent_when_agent_json_is_valid(tmp_path):
+    run_init(["--home", str(tmp_path)], post=_uuid_server(), out=lambda _: None)
+    before = (tmp_path / "agent.json").read_text()
+    again = _uuid_server()
+    lines: list[str] = []
+
+    rc = run_init(["--home", str(tmp_path)], post=again, out=lines.append)
+
+    assert rc == 0
+    assert again.calls == []  # no second signup
+    assert (tmp_path / "agent.json").read_text() == before
+    text = "\n".join(lines)
+    assert AGENT_UUID in text and "--force" in text and "mcpServers" in text
+    assert "tok-123" not in text
+
+
+def test_force_creates_a_new_agent_and_keeps_a_backup(tmp_path):
+    run_init(["--home", str(tmp_path)], post=_uuid_server(), out=lambda _: None)
+    before = (tmp_path / "agent.json").read_text()
+    again = _uuid_server()
+
+    rc = run_init(["--home", str(tmp_path), "--force"], post=again, out=lambda _: None)
+
+    assert rc == 0
+    assert len(again.calls) == 2
+    assert (tmp_path / "agent.json.bak").read_text() == before
+    assert (tmp_path / "agent.json").read_text() != before
+
+
+def test_an_invalid_agent_json_is_not_overwritten_without_force(tmp_path):
+    (tmp_path / "agent.json").write_text('{"env": {"IRL_API_TOKEN": "keep-me"', encoding="utf-8")
+    server = _uuid_server()
+
+    with pytest.raises(InitError, match="--force") as info:
+        run_init(["--home", str(tmp_path)], post=server, out=lambda _: None)
+
+    assert server.calls == []
+    assert "keep-me" not in str(info.value)
+    assert "keep-me" in (tmp_path / "agent.json").read_text()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+def test_agent_json_is_private_from_creation(tmp_path):
+    run_init(["--home", str(tmp_path)], post=_uuid_server(), out=lambda _: None)
+    assert stat.S_IMODE((tmp_path / "agent.json").stat().st_mode) == 0o600
+
+
+def _mcp_block(lines: list[str]) -> dict:
+    text = "\n".join(lines)
+    return json.loads(text[text.index("{") : text.rindex("}") + 1])
+
+
+def test_mcp_config_uses_the_absolute_uvx_path(tmp_path, monkeypatch):
+    uvx = str(tmp_path / "bin" / "uvx")
+    monkeypatch.setattr(init_module.shutil, "which", lambda name: uvx if name == "uvx" else None)
+    monkeypatch.setattr(init_module, "_default_home", lambda: tmp_path)
+    lines: list[str] = []
+
+    run_init(["--home", str(tmp_path)], post=_uuid_server(), out=lines.append)
+
+    entry = _mcp_block(lines)["mcpServers"]["irl-gateway"]
+    assert entry == {"command": uvx, "args": ["irl-gateway"]}
+
+
+def test_mcp_config_falls_back_to_bare_uvx(tmp_path, monkeypatch):
+    monkeypatch.setattr(init_module.shutil, "which", lambda name: None)
+    lines: list[str] = []
+
+    run_init(["--home", str(tmp_path)], post=_uuid_server(), out=lines.append)
+
+    entry = _mcp_block(lines)["mcpServers"]["irl-gateway"]
+    assert entry["command"] == "uvx"
+    # A non-default home has to reach the server, or it won't find agent.json.
+    assert entry["env"] == {"IRL_GATEWAY_HOME": str(tmp_path)}
+    assert f"IRL_GATEWAY_HOME={tmp_path}" in "\n".join(lines)
