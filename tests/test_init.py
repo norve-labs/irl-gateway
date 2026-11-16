@@ -12,7 +12,6 @@ import pytest
 
 from irl_gateway import init as init_module
 from irl_gateway.init import InitError, run_init
-from irl_gateway.init import main as init_main
 
 
 class FakeServer:
@@ -64,7 +63,8 @@ def test_init_signs_up_registers_and_prints_config(tmp_path):
     assert saved["env"]["IRL_MODEL_HASH"] == reg_body["model_hash_hex"]
     text = "\n".join(lines)
     assert "claude mcp add irl-gateway" in text
-    assert '"IRL_BASE_URL": "https://irl.test"' in text
+    assert saved["env"]["IRL_BASE_URL"] == "https://irl.test"
+    assert "tok-123" not in text  # the server reads the token from agent.json
 
 
 def test_init_explains_a_server_without_signup(tmp_path):
@@ -128,7 +128,7 @@ def test_main_survives_non_ascii_input_on_a_cp1252_stdout(tmp_path, monkeypatch)
     stream = _cp1252_stdout(monkeypatch)
     home = tmp_path / "\u65e5\u672c"  # a home path cp1252 can't encode
 
-    rc = init_main(["--home", str(home), "--name", "bot-\u2713"], post=_uuid_server())
+    rc = init_module.main(["--home", str(home), "--name", "bot-\u2713"], post=_uuid_server())
 
     assert rc == 0
     assert "mcpServers" in _captured(stream)
@@ -138,7 +138,7 @@ def test_main_survives_non_ascii_input_on_a_cp1252_stdout(tmp_path, monkeypatch)
 def test_main_reports_init_errors_on_stderr(tmp_path, capsys):
     server = FakeServer(signup=(429, {"message": "try again tomorrow"}))
 
-    rc = init_main(["--home", str(tmp_path)], post=server)
+    rc = init_module.main(["--home", str(tmp_path)], post=server)
 
     captured = capsys.readouterr()
     assert rc == 1

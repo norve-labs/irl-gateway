@@ -1,14 +1,20 @@
 """Gateway settings from environment variables, validated at startup.
 
 Required: IRL_BASE_URL, IRL_API_TOKEN, IRL_AGENT_ID, IRL_MODEL_HASH.
+When the environment carries none of the agent identity, they come from the
+agent.json that `irl-gateway init` writes (see `resolve_env`).
 The broker defaults to paper trading at live public prices; a real account
 needs GATEWAY_BROKER=exchange plus exchange credentials.
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 import re
-from collections.abc import Mapping
+import stat
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,8 +22,34 @@ _HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
 _UUID = re.compile(r"^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
 
 
+logger = logging.getLogger(__name__)
+
+AGENT_FILE = "agent.json"
+# The agent identity is one unit: a token, its agent and the model hash it was
+# registered with. It comes whole from the environment or whole from agent.json.
+IDENTITY_KEYS = ("IRL_API_TOKEN", "IRL_AGENT_ID", "IRL_MODEL_HASH")
+# What agent.json may set. Exchange credentials and the broker choice are
+# deliberately absent: a file on disk never switches the gateway to live trading.
+FILE_KEYS = frozenset(
+    {
+        "IRL_BASE_URL",
+        *IDENTITY_KEYS,
+        "AGENT_MODEL_ID",
+        "AGENT_CONFIG_CHECKSUM",
+        "IRL_L2_MODE",
+        "EXCHANGE_ID",
+        "PAPER_BALANCES",
+    }
+)
+_IS_POSIX = os.name == "posix"
+
+
 class ConfigError(ValueError):
     pass
+
+
+class NotConfiguredError(ConfigError):
+    """Neither the environment nor agent.json holds an agent identity."""
 
 
 @dataclass(frozen=True)
@@ -69,7 +101,7 @@ def load_settings(env: Mapping[str, str]) -> Settings:
     if broker == "exchange" and not (api_key and api_secret):
         raise ConfigError("GATEWAY_BROKER=exchange needs EXCHANGE_API_KEY and EXCHANGE_API_SECRET")
 
-    home = Path(env.get("IRL_GATEWAY_HOME", str(Path.home() / ".irl-gateway")))
+    home = gateway_home(env)
     return Settings(
         irl_base_url=required("IRL_BASE_URL"),
         irl_api_token=required("IRL_API_TOKEN"),
@@ -112,3 +144,78 @@ def _bool(text: str) -> bool:
     if value in ("0", "false", "no", "off"):
         return False
     raise ConfigError(f"expected a boolean, got {text!r}")
+
+
+def gateway_home(env: Mapping[str, str]) -> Path:
+    configured = env.get("IRL_GATEWAY_HOME", "").strip()
+    return Path(configured) if configured else Path.home() / ".irl-gateway"
+
+
+def resolve_env(
+    env: Mapping[str, str], *, warn: Callable[[str], None] = logger.warning
+) -> dict[str, str]:
+    """The environment, completed from agent.json when it lacks the identity.
+
+    Environment values win over the file; empty values count as unset. The
+    file's token is only ever used with the server it was issued for.
+    """
+    present = [k for k in IDENTITY_KEYS if env.get(k, "").strip()]
+    if len(present) == len(IDENTITY_KEYS):
+        return dict(env)
+    path = gateway_home(env) / AGENT_FILE
+    if present:
+        missing = [k for k in IDENTITY_KEYS if k not in present]
+        raise ConfigError(
+            f"{', '.join(present)} set but {', '.join(missing)} missing: set all of "
+            f"{', '.join(IDENTITY_KEYS)} in the environment, or none of them to use {path}"
+        )
+    if not path.exists():
+        raise NotConfiguredError(f"no agent identity in the environment and no {path}")
+    file_env = read_agent_file(path)
+    if _readable_by_others(path):
+        warn(f"{path} holds your IRL token and is readable by other users; run: chmod 600 {path}")
+    env_url = env.get("IRL_BASE_URL", "").strip().rstrip("/")
+    file_url = file_env.get("IRL_BASE_URL", "").strip().rstrip("/")
+    if env_url and env_url != file_url:
+        raise ConfigError(
+            f"IRL_BASE_URL is set to a different server than the one {path} was issued for; "
+            "unset it, or set the token, agent and model hash for that server too"
+        )
+    merged = dict(file_env)
+    merged.update({k: v for k, v in env.items() if v.strip()})
+    return merged
+
+
+def read_agent_file(path: Path) -> dict[str, str]:
+    """The validated `env` block of agent.json. Error messages name keys and
+    the path, never values: the file holds a bearer token."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(f"could not read {path}: {exc.strerror or type(exc).__name__}") from None
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        raise ConfigError(f"{path} is not valid JSON") from None
+    block = payload.get("env") if isinstance(payload, dict) else None
+    if not isinstance(block, dict):
+        raise ConfigError(f"{path} must hold an object with an 'env' object")
+    env: dict[str, str] = {}
+    for key, value in block.items():
+        if key not in FILE_KEYS:
+            raise ConfigError(
+                f"{path} sets {key}, which agent.json can't set; use an environment variable"
+            )
+        if not isinstance(value, str):
+            raise ConfigError(f"{path}: {key} must be a string")
+        env[key] = value
+    missing = [k for k in ("IRL_BASE_URL", *IDENTITY_KEYS) if not env.get(k, "").strip()]
+    if missing:
+        raise ConfigError(f"{path} is missing {', '.join(missing)}")
+    return env
+
+
+def _readable_by_others(path: Path) -> bool:
+    if not _IS_POSIX:
+        return False  # Windows: the user profile's ACLs already restrict it
+    return bool(stat.S_IMODE(path.stat().st_mode) & (stat.S_IRWXG | stat.S_IRWXO))

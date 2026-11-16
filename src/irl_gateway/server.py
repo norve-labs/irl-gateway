@@ -3,6 +3,7 @@ custom). One tool moves money (`execute_trade`); the rest are read-only."""
 
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import sys
@@ -13,8 +14,15 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
+from irl_gateway import __version__
 from irl_gateway.brokers import CcxtBroker, PaperBroker, public_market
-from irl_gateway.config import Settings, load_settings
+from irl_gateway.config import (
+    ConfigError,
+    NotConfiguredError,
+    Settings,
+    load_settings,
+    resolve_env,
+)
 from irl_gateway.gateway import AgentConfig, TradeGateway, TradeRequest
 from irl_gateway.irl import IrlClient, IrlError
 from irl_gateway.journal import Journal
@@ -154,11 +162,52 @@ def create_server(gateway: TradeGateway) -> MCPServer:
     return server
 
 
+INIT_HINT = "uvx irl-gateway init"
+NOT_CONFIGURED = (
+    f"irl-gateway is not configured. Run: {INIT_HINT}  "
+    "(free paper-trading token, https://norve.dev)"
+)
+
+# Exit status for "can't start: configuration", distinct from a crash (1).
+EXIT_CONFIG = 2
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="irl-gateway",
+        description=(
+            "MCP server (stdio) that puts IRL's pre-trade policy and sealed audit trail "
+            "between an AI agent and its exchange account."
+        ),
+        epilog=(
+            f"First time? Run '{INIT_HINT}' for a free paper token; the server then reads "
+            "~/.irl-gateway/agent.json. Environment variables (IRL_BASE_URL, IRL_API_TOKEN, "
+            "IRL_AGENT_ID, IRL_MODEL_HASH, ...) override it. "
+            "See 'irl-gateway init --help'."
+        ),
+    )
+    parser.add_argument("--version", action="version", version=f"irl-gateway {__version__}")
+    return parser
+
+
+def _load_or_exit() -> Settings:
+    # stdout carries the MCP protocol: every message here goes to stderr.
+    try:
+        return load_settings(resolve_env(os.environ))
+    except NotConfiguredError:
+        print(NOT_CONFIGURED, file=sys.stderr)
+    except ConfigError as exc:
+        print(f"irl-gateway: invalid configuration: {exc}", file=sys.stderr)
+        print(f"  Fix it, or create a fresh paper config with: {INIT_HINT}", file=sys.stderr)
+    raise SystemExit(EXIT_CONFIG)
+
+
 def main() -> None:
     if sys.argv[1:2] == ["init"]:  # `irl-gateway init`: onboarding, not the server
         from irl_gateway.init import main as init_main
 
         raise SystemExit(init_main(sys.argv[2:]))
-    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
-    gateway = build_gateway(load_settings(os.environ))
+    _parser().parse_args(sys.argv[1:])
+    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))  # stderr
+    gateway = build_gateway(_load_or_exit())
     create_server(gateway).run("stdio")

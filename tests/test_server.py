@@ -129,6 +129,7 @@ def _clean_env(home: Path) -> dict[str, str]:
 def _run_cli(home: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-m", "irl_gateway", *args],
+        check=False,
         env=_clean_env(home),
         capture_output=True,
         text=True,
