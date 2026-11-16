@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import stat
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,7 +42,6 @@ FILE_KEYS = frozenset(
         "PAPER_BALANCES",
     }
 )
-_IS_POSIX = os.name == "posix"
 
 
 class ConfigError(ValueError):
@@ -169,11 +169,9 @@ def resolve_env(
             f"{', '.join(present)} set but {', '.join(missing)} missing: set all of "
             f"{', '.join(IDENTITY_KEYS)} in the environment, or none of them to use {path}"
         )
-    if not path.exists():
+    if not agent_file_exists(path):
         raise NotConfiguredError(f"no agent identity in the environment and no {path}")
-    file_env = read_agent_file(path)
-    if _readable_by_others(path):
-        warn(f"{path} holds your IRL token and is readable by other users; run: chmod 600 {path}")
+    file_env = read_agent_file(path, warn=warn)
     env_url = env.get("IRL_BASE_URL", "").strip().rstrip("/")
     file_url = file_env.get("IRL_BASE_URL", "").strip().rstrip("/")
     if env_url and env_url != file_url:
@@ -186,13 +184,24 @@ def resolve_env(
     return merged
 
 
-def read_agent_file(path: Path) -> dict[str, str]:
+def agent_file_exists(path: Path) -> bool:
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:  # e.g. PermissionError on the directory
+        raise ConfigError(f"could not read {path}: {_reason(exc)}") from None
+    return True
+
+
+def read_agent_file(path: Path, *, warn: Callable[[str], None] = logger.warning) -> dict[str, str]:
     """The validated `env` block of agent.json. Error messages name keys and
     the path, never values: the file holds a bearer token."""
+    _check_permissions(path, warn)
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise ConfigError(f"could not read {path}: {exc.strerror or type(exc).__name__}") from None
+        raise ConfigError(f"could not read {path}: {_reason(exc)}") from None
     try:
         payload = json.loads(text)
     except ValueError:
@@ -215,7 +224,45 @@ def read_agent_file(path: Path) -> dict[str, str]:
     return env
 
 
-def _readable_by_others(path: Path) -> bool:
-    if not _IS_POSIX:
-        return False  # Windows: the user profile's ACLs already restrict it
-    return bool(stat.S_IMODE(path.stat().st_mode) & (stat.S_IRWXG | stat.S_IRWXO))
+def _check_permissions(path: Path, warn: Callable[[str], None]) -> None:
+    """POSIX: refuse a file another user could have written (it chooses where
+    the token goes and which agent trades); warn if others can read it."""
+    owner_mode = _posix_owner_mode(path)
+    if owner_mode is None:
+        return  # Windows: access is governed by the profile's ACLs
+    mode, uid, me = owner_mode
+    problem = _unsafe_reason(mode, uid, me)
+    if problem:
+        raise ConfigError(
+            f"{path} is {problem}; refusing to use it. Check its contents, then make it "
+            f"yours and private: chmod 600 {path}"
+        )
+    if _readable_by_others(mode):
+        warn(f"{path} holds your IRL token and is readable by other users; run: chmod 600 {path}")
+
+
+def _posix_owner_mode(path: Path) -> tuple[int, int, int] | None:
+    """(permission bits, file owner uid, current uid), or None on Windows."""
+    if sys.platform == "win32":
+        return None
+    try:
+        st = path.stat()
+    except OSError as exc:
+        raise ConfigError(f"could not read {path}: {_reason(exc)}") from None
+    return stat.S_IMODE(st.st_mode), st.st_uid, os.getuid()
+
+
+def _unsafe_reason(mode: int, uid: int, me: int) -> str | None:
+    if uid != me:
+        return "owned by another user"
+    if mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return "writable by other users"
+    return None
+
+
+def _readable_by_others(mode: int) -> bool:
+    return bool(mode & (stat.S_IRGRP | stat.S_IROTH))
+
+
+def _reason(exc: OSError) -> str:
+    return exc.strerror or type(exc).__name__

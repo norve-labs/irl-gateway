@@ -7,7 +7,7 @@
    server reads agent.json itself, so the printed config carries no token.
 
 Running it again reuses a valid agent.json instead of signing up twice;
-`--force` creates a new agent (the old file is kept as agent.json.bak).
+`--force` creates a new agent (the old file is kept as agent.json.<timestamp>.bak).
 
 Paper-tier tokens can only trade on paper venues; ask the server's operator
 for a full token to trade live.
@@ -26,13 +26,21 @@ import sys
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from irl_gateway.config import AGENT_FILE, ConfigError, load_settings, read_agent_file
+from irl_gateway.config import (
+    AGENT_FILE,
+    ConfigError,
+    agent_file_exists,
+    gateway_home,
+    load_settings,
+    read_agent_file,
+)
 
 DEFAULT_SERVER = "https://norve.dev"
-BACKUP_FILE = f"{AGENT_FILE}.bak"
+BACKUP_PATTERN = f"{AGENT_FILE}.<timestamp>.bak"
 
 PostJson = Callable[[str, dict[str, Any], str | None], tuple[int, dict[str, Any]]]
 
@@ -91,13 +99,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--home",
-        default=str(_default_home()),
-        help="where to save agent.json (default ~/.irl-gateway)",
+        default=str(gateway_home(os.environ)),
+        help="where to save agent.json (default $IRL_GATEWAY_HOME or ~/.irl-gateway)",
     )
     p.add_argument(
         "--force",
         action="store_true",
-        help=f"sign up a new agent even if agent.json exists (keeps {BACKUP_FILE})",
+        help=f"sign up a new agent even if agent.json exists (keeps {BACKUP_PATTERN})",
     )
     return p
 
@@ -111,10 +119,11 @@ def run_init(
         raise InitError("--assets must look like BTC/USDT,ETH/USDT")
     if not args.max_notional > 0:
         raise InitError("--max-notional must be positive")
-    home = Path(args.home)
+    # Absolute, so the IRL_GATEWAY_HOME we may print works from any directory.
+    home = Path(args.home).expanduser().absolute()
     saved = home / AGENT_FILE
 
-    if saved.exists() and not args.force:
+    if _exists(saved) and not args.force:
         env = _existing_env(saved)
         out(f"Found {saved}: agent {env['IRL_AGENT_ID']} on {env['IRL_BASE_URL']}.")
         out("  Not signing up again. To create a new agent instead, re-run with --force.")
@@ -122,15 +131,12 @@ def run_init(
         return 0
 
     env, tier = _signup_and_register(args, assets, post)
-    backup = home / BACKUP_FILE
-    replaced = saved.exists()
-    if replaced:
-        os.replace(saved, backup)
-    _write_private(saved, json.dumps({"tier": tier, "env": env}, indent=2))
+    backup = _save(saved, json.dumps({"tier": tier, "env": env}, indent=2))
     # The path first: if anything below fails, the user still knows where it is.
     out(f"Saved to {saved} (keep it private: it holds your token).")
-    if replaced:
-        out(f"  Previous config kept as {backup}.")
+    if backup is not None:
+        out(f"  Previous config kept as {backup}: it holds the old token, delete it")
+        out("  or revoke that token once you no longer need it.")
     out(f"OK: paper-tier token issued and agent '{args.name}' registered ({env['IRL_AGENT_ID']}).")
     out(
         f"  Mandate: {', '.join(assets)} on paper-{args.exchange}, "
@@ -147,9 +153,16 @@ def _existing_env(saved: Path) -> dict[str, str]:
     except ConfigError as exc:  # messages name keys and paths, never the token
         raise InitError(
             f"{saved} exists but isn't a valid gateway config ({exc}). Re-run with --force "
-            f"to sign up again (the old file is kept as {BACKUP_FILE})."
+            f"to sign up again (the old file is kept as {BACKUP_PATTERN})."
         ) from None
     return env
+
+
+def _exists(path: Path) -> bool:
+    try:
+        return agent_file_exists(path)
+    except ConfigError as exc:
+        raise InitError(str(exc)) from None
 
 
 def _signup_and_register(
@@ -198,23 +211,85 @@ def _signup_and_register(
     return env, body.get("tier")
 
 
-def _write_private(path: Path, text: str) -> None:
-    """Write `text` to `path`, owner-only (POSIX) from the first byte."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _save(path: Path, text: str) -> Path | None:
+    """Replace agent.json without ever losing the previous one.
+
+    The new content is fully written (owner-only on POSIX, from the first
+    byte) before anything moves; the previous file goes to a timestamped
+    backup, so repeated --force runs keep every older token; if the final
+    move fails, the previous file is put back. Returns the backup, if any.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.unlink(missing_ok=True)  # an existing file would keep its old mode
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(text)
-    os.replace(tmp, path)
+    backup: Path | None = None
+    try:
+        tmp.unlink(missing_ok=True)  # an existing file would keep its old mode
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        if _exists(path):
+            backup = _backup_path(path)
+            os.replace(path, backup)
+        try:
+            os.replace(tmp, path)
+        except OSError:
+            if backup is not None:
+                os.replace(backup, path)
+            raise
+    except OSError as exc:
+        raise InitError(
+            f"could not save {path} ({exc.strerror or type(exc).__name__}); the new token "
+            "was issued but not saved, and any previous agent.json is unchanged"
+        ) from None
+    finally:
+        tmp.unlink(missing_ok=True)
+    return backup
+
+
+def _backup_path(path: Path) -> Path:
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    candidate = path.with_name(f"{path.name}.{stamp}.bak")
+    counter = 1
+    while candidate.exists():
+        candidate = path.with_name(f"{path.name}.{stamp}-{counter}.bak")
+        counter += 1
+    return candidate
+
+
+def _trusted_uvx() -> str | None:
+    """Absolute path of uvx from PATH, never from the current directory.
+
+    On Windows `shutil.which("uvx")` looks in the cwd first, even with an
+    explicit `path=`; a uvx planted there must not end up in a client config.
+    So skip empty, relative and cwd entries, and look each remaining directory
+    up with a directory part, which disables the implicit cwd lookup.
+    """
+    try:
+        cwd: str | None = os.path.normcase(os.path.realpath(os.getcwd()))
+    except OSError:
+        cwd = None
+    for raw in os.environ.get("PATH", "").split(os.pathsep):
+        entry = raw.strip().strip('"')
+        if not entry or not os.path.isabs(entry):
+            continue  # "", "." and relative entries resolve against the cwd
+        if os.path.normcase(os.path.realpath(entry)) == cwd:
+            continue
+        found = shutil.which(os.path.join(entry, "uvx"))
+        if found and os.path.isabs(found):
+            return found
+    return None
 
 
 def _print_client_config(home: Path, out: Callable[[str], None]) -> None:
     # GUI clients (Claude Desktop on macOS in particular) don't inherit the
     # shell's PATH, so a bare "uvx" fails with `spawn uvx ENOENT`: give them the
     # absolute path. Claude Code runs from the user's shell, where "uvx" resolves.
-    uvx = shutil.which("uvx") or "uvx"
-    entry: dict[str, Any] = {"command": uvx, "args": ["irl-gateway"]}
+    uvx = _trusted_uvx()
+    if uvx is None:
+        out("")
+        out('Warning: no uvx found on PATH (outside the current directory). Replace "uvx"')
+        out("below with its absolute path: `which uvx` (macOS/Linux) or `where uvx` (Windows).")
+    entry: dict[str, Any] = {"command": uvx or "uvx", "args": ["irl-gateway"]}
     env_flags: list[str] = []
     if home.resolve() != _default_home().resolve():
         # The server only finds agent.json elsewhere if it's told where.

@@ -226,9 +226,7 @@ def test_init_uses_irl_gateway_home_when_no_home_is_given(tmp_path, monkeypatch)
     run_init([], post=_uuid_server(), out=lines.append)
 
     assert (home / "agent.json").exists()
-    assert _mcp_block(lines)["mcpServers"]["irl-gateway"]["env"] == {
-        "IRL_GATEWAY_HOME": str(home)
-    }
+    assert _mcp_block(lines)["mcpServers"]["irl-gateway"]["env"] == {"IRL_GATEWAY_HOME": str(home)}
 
 
 def test_existence_check_permission_error_is_an_init_error(tmp_path, monkeypatch):
@@ -250,6 +248,7 @@ def test_existence_check_permission_error_is_an_init_error(tmp_path, monkeypatch
 
 def test_an_invalid_agent_json_is_not_overwritten_without_force(tmp_path):
     (tmp_path / "agent.json").write_text('{"env": {"IRL_API_TOKEN": "keep-me"', encoding="utf-8")
+    (tmp_path / "agent.json").chmod(0o600)
     server = _uuid_server()
 
     with pytest.raises(InitError, match="--force") as info:
@@ -288,7 +287,9 @@ def test_mcp_config_uses_the_absolute_uvx_path(tmp_path, monkeypatch):
     run_init(["--home", str(tmp_path / "home")], post=_uuid_server(), out=lines.append)
 
     entry = _mcp_block(lines)["mcpServers"]["irl-gateway"]
-    assert entry == {"command": str(real), "args": ["irl-gateway"]}
+    assert entry["args"] == ["irl-gateway"] and "env" not in entry
+    # Windows returns the PATHEXT spelling (uvx.EXE): compare case-insensitively there.
+    assert os.path.normcase(entry["command"]) == os.path.normcase(str(real))
 
 
 def test_a_uvx_planted_in_the_cwd_is_never_printed(tmp_path, monkeypatch):
@@ -303,7 +304,8 @@ def test_a_uvx_planted_in_the_cwd_is_never_printed(tmp_path, monkeypatch):
 
     run_init(["--home", str(tmp_path / "home")], post=_uuid_server(), out=lines.append)
 
-    assert _mcp_block(lines)["mcpServers"]["irl-gateway"]["command"] == str(real)
+    command = _mcp_block(lines)["mcpServers"]["irl-gateway"]["command"]
+    assert os.path.normcase(command) == os.path.normcase(str(real))
 
 
 def test_only_an_untrusted_uvx_falls_back_to_bare_uvx_with_a_warning(tmp_path, monkeypatch):

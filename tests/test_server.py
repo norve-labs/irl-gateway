@@ -161,6 +161,7 @@ def test_help_and_version_work_without_config(tmp_path):
 
 def test_invalid_config_is_one_clear_message(tmp_path, monkeypatch, capsys):
     (tmp_path / "agent.json").write_text("{broken", encoding="utf-8")
+    (tmp_path / "agent.json").chmod(0o600)
     for name in _IRL_VARS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("IRL_GATEWAY_HOME", str(tmp_path))
@@ -189,6 +190,7 @@ def test_server_starts_from_agent_json_alone(tmp_path, monkeypatch, capsys):
         ),
         encoding="utf-8",
     )
+    (tmp_path / "agent.json").chmod(0o600)  # POSIX refuses a group-writable file
     for name in _IRL_VARS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("IRL_GATEWAY_HOME", str(tmp_path))
