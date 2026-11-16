@@ -21,24 +21,24 @@
       "environmentVariables": [
         {
           "name": "IRL_BASE_URL",
-          "description": "Your IRL server, e.g. https://irl.example.com",
-          "isRequired": true
+          "description": "IRL server URL. Optional: by default read from ~/.irl-gateway/agent.json; run `uvx irl-gateway init` to create it (free paper token from https://norve.dev)",
+          "isRequired": false
         },
         {
           "name": "IRL_API_TOKEN",
-          "description": "Bearer token for the IRL server",
-          "isRequired": true,
+          "description": "Bearer token for the IRL server. Optional: by default read from ~/.irl-gateway/agent.json, or run `uvx irl-gateway init`",
+          "isRequired": false,
           "isSecret": true
         },
         {
           "name": "IRL_AGENT_ID",
-          "description": "The agent registered on IRL (its mandate)",
-          "isRequired": true
+          "description": "The agent registered on IRL (its mandate). Optional: by default read from ~/.irl-gateway/agent.json, or run `uvx irl-gateway init`",
+          "isRequired": false
         },
         {
           "name": "IRL_MODEL_HASH",
-          "description": "The model hash the agent was registered with (64 hex)",
-          "isRequired": true
+          "description": "The model hash the agent was registered with (64 hex). Optional: by default read from ~/.irl-gateway/agent.json, or run `uvx irl-gateway init`",
+          "isRequired": false
         },
         {
           "name": "GATEWAY_BROKER",

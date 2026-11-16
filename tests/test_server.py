@@ -2,8 +2,18 @@
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from irl_gateway import __version__
+from irl_gateway import server as server_module
 from irl_gateway.brokers import PaperBroker
-from irl_gateway.config import load_settings
+from irl_gateway.config import Settings, load_settings
 from irl_gateway.server import build_gateway, create_server
 
 from .fakes import AGENT_ID, MODEL_HASH, make_gateway
@@ -98,3 +108,105 @@ async def test_build_gateway_defaults_to_paper_on_public_prices(tmp_path):
     finally:
         await gateway.broker.close()
         await gateway.irl.close()
+
+
+# ---- process entry point: unconfigured, --help, --version, agent.json ----------
+
+_IRL_VARS = ("IRL_BASE_URL", "IRL_API_TOKEN", "IRL_AGENT_ID", "IRL_MODEL_HASH")
+
+
+_CONFIG_PREFIXES = ("IRL_", "GATEWAY_", "EXCHANGE_", "AGENT_", "PAPER_")
+
+
+def _clean_env(home: Path) -> dict[str, str]:
+    # No gateway configuration leaks in from the developer's or CI's shell.
+    env = {k: v for k, v in os.environ.items() if not k.startswith(_CONFIG_PREFIXES)}
+    env.update(
+        IRL_GATEWAY_HOME=str(home),
+        HOME=str(home),
+        USERPROFILE=str(home),
+        PYTHONIOENCODING="",
+    )
+    return env
+
+
+def _run_cli(home: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "irl_gateway", *args],
+        check=False,
+        env=_clean_env(home),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def test_unconfigured_server_says_what_to_run_without_a_traceback(tmp_path):
+    result = _run_cli(tmp_path)
+
+    assert result.returncode == 2
+    assert result.stdout == ""  # stdout belongs to the MCP protocol
+    assert "Traceback" not in result.stderr
+    assert "uvx irl-gateway init" in result.stderr
+    assert len(result.stderr.strip().splitlines()) <= 2
+
+
+def test_help_and_version_work_without_config(tmp_path):
+    helped = _run_cli(tmp_path, "--help")
+    version = _run_cli(tmp_path, "--version")
+
+    assert helped.returncode == 0 and "init" in helped.stdout and "Traceback" not in helped.stderr
+    assert version.returncode == 0 and __version__ in version.stdout
+
+
+def test_invalid_config_is_one_clear_message(tmp_path, monkeypatch, capsys):
+    (tmp_path / "agent.json").write_text("{broken", encoding="utf-8")
+    (tmp_path / "agent.json").chmod(0o600)
+    for name in _IRL_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("IRL_GATEWAY_HOME", str(tmp_path))
+    monkeypatch.setattr(sys, "argv", ["irl-gateway"])
+
+    with pytest.raises(SystemExit) as info:
+        server_module.main()
+
+    captured = capsys.readouterr()
+    assert info.value.code == 2
+    assert captured.out == ""
+    assert "not valid JSON" in captured.err and "uvx irl-gateway init" in captured.err
+
+
+def test_server_starts_from_agent_json_alone(tmp_path, monkeypatch, capsys):
+    (tmp_path / "agent.json").write_text(
+        json.dumps(
+            {
+                "env": {
+                    "IRL_BASE_URL": "https://norve.dev",
+                    "IRL_API_TOKEN": "tok-file",
+                    "IRL_AGENT_ID": AGENT_ID,
+                    "IRL_MODEL_HASH": MODEL_HASH,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "agent.json").chmod(0o600)  # POSIX refuses a group-writable file
+    for name in _IRL_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("IRL_GATEWAY_HOME", str(tmp_path))
+    monkeypatch.setattr(sys, "argv", ["irl-gateway"])
+    seen: list[Settings] = []
+    ran: list[str] = []
+
+    class FakeServer:
+        def run(self, transport: str) -> None:
+            ran.append(transport)
+
+    monkeypatch.setattr(server_module, "build_gateway", lambda s: seen.append(s) or "gw")
+    monkeypatch.setattr(server_module, "create_server", lambda gw: FakeServer())
+
+    server_module.main()
+
+    assert seen[0].irl_api_token == "tok-file" and seen[0].agent_id == AGENT_ID
+    assert ran == ["stdio"]
+    assert capsys.readouterr().out == ""

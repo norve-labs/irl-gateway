@@ -38,20 +38,33 @@ Behaviour the agent can rely on:
 - **No silent fills.** If the exchange fills but the IRL bind fails, the result still reports the fill and flags it for reconciliation.
 - **Sealed = sent.** Order sizes are rounded to the venue's step and checked against its minimums *before* IRL seals them, so the sealed quantity is exactly what reaches the exchange. An order the venue would reject is blocked with a plain reason instead.
 
+## Requirements
+
+- **[uv](https://docs.astral.sh/uv/getting-started/installation/)**, which provides `uvx`. The commands below and the MCP config that `init` prints run the gateway through `uvx`, which also fetches a suitable Python for you. Without uv you get `uvx: command not found`.
+- Alternatively, `pipx install irl-gateway` or `pip install irl-gateway` on **Python 3.12 or newer** (the `python3` that ships with macOS is older). Then run `irl-gateway` instead of `uvx irl-gateway`, and in your MCP client use the absolute path of the `irl-gateway` executable as the command.
+
 ## Quick start (paper trading, about a minute)
 
 ```bash
 uvx irl-gateway init
 ```
 
-That one command gets a free paper-tier token from [norve.dev](https://norve.dev), registers your agent with a starter mandate (BTC/USDT and ETH/USDT, at most 1,000 USDT per order, on `paper-binance`), saves the credentials to `~/.irl-gateway/agent.json`, and prints:
+That one command gets a free paper-tier token from [norve.dev](https://norve.dev), registers your agent with a starter mandate (BTC/USDT and ETH/USDT, at most 1,000 USDT per order, on `paper-binance`), saves the credentials to `~/.irl-gateway/agent.json` (or `$IRL_GATEWAY_HOME`, or `--home`), and prints:
 
-- a `claude mcp add irl-gateway ...` line for Claude Code, and
+- a `claude mcp add irl-gateway -- uvx irl-gateway` line for Claude Code, and
 - an `mcpServers` block for Claude Desktop, Cursor or any MCP client.
 
 Paste one of them, then ask the agent to call `get_policy` and make its first paper trade. Paper fills are simulated at live public Binance prices with Binance's real order-size rules, so no exchange keys are needed.
 
-Options: `--name`, `--assets BTC/USDT,SOL/USDT`, `--max-notional 250`, `--contact you@example.com` (so we can reach you), `--server` (your own IRL engine).
+The server reads the token from `agent.json`, so neither config contains it. In the `mcpServers` block, `command` is the **absolute path** of `uvx` on your machine: desktop apps such as Claude Desktop on macOS don't inherit your shell's `PATH`, and a bare `"uvx"` fails there with `spawn uvx ENOENT`. `init` only takes `uvx` from absolute `PATH` entries other than the current directory, so a `uvx` dropped into the folder you run it from never ends up in your config. If it can't find one, it prints `"uvx"` with a warning; replace it with the output of `which uvx` (macOS/Linux) or `where uvx` (Windows).
+
+`agent.json` holds your token. On macOS and Linux, `init` creates it with mode `600` (only you can read it). On Windows its access comes from the folder's permissions: inside your user profile (the default) other users can't read it, but with `--home` or `IRL_GATEWAY_HOME` pointing outside the profile it may be readable by others, so keep it in a private folder.
+
+Running `init` again doesn't sign up again: it finds the existing `agent.json` and prints the config. Use `--force` to register a new agent. The previous file is kept as `agent.json.<timestamp>.bak`, and **it still holds the old token**: delete it, or revoke that token, once you no longer need it.
+
+Options: `--name`, `--assets BTC/USDT,SOL/USDT`, `--max-notional 250`, `--contact you@example.com` (so we can reach you), `--server` (your own IRL engine), `--home` (where to keep `agent.json`), `--force`.
+
+Run `irl-gateway --help` or `--version` at any time. If the server starts without any configuration, it says so on stderr and tells you to run `uvx irl-gateway init`.
 
 **Free tier limits:** paper venues only, up to 3 agents and 500 authorizations a day per token. Want to trade live, or run without limits? Self-host the [engine](https://github.com/norve-labs/irl) or ask for a full token.
 
@@ -98,8 +111,8 @@ Then add the gateway to your MCP client:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `IRL_BASE_URL`, `IRL_API_TOKEN` | required | IRL server and bearer token |
-| `IRL_AGENT_ID`, `IRL_MODEL_HASH` | required | The registered agent and its model hash |
+| `IRL_BASE_URL`, `IRL_API_TOKEN` | from `agent.json` | IRL server and bearer token |
+| `IRL_AGENT_ID`, `IRL_MODEL_HASH` | from `agent.json` | The registered agent and its model hash |
 | `AGENT_MODEL_ID` | `unspecified-model` | Model name sealed into each trace (the agent can override it per trade) |
 | `AGENT_CONFIG_CHECKSUM` | `none` | Optional checksum of the agent's configuration, sealed into each trace |
 | `IRL_L2_MODE` | `off` | `regime` if your IRL server requires Layer 2 regime binding |
@@ -108,7 +121,9 @@ Then add the gateway to your MCP client:
 | `EXCHANGE_API_KEY`, `EXCHANGE_API_SECRET` | | Required for `exchange` |
 | `EXCHANGE_TESTNET` | `true` | Use the exchange's testnet |
 | `PAPER_BALANCES` | `USDT=1000` | Starting paper balances (used only until `paper_state.json` exists; the paper account then persists across restarts) |
-| `IRL_GATEWAY_HOME` | `~/.irl-gateway` | Journal (`journal.jsonl`), kill switch (`KILL`) and paper account (`paper_state.json`) location |
+| `IRL_GATEWAY_HOME` | `~/.irl-gateway` | Location of `agent.json`, the journal (`journal.jsonl`), the kill switch (`KILL`) and the paper account (`paper_state.json`) |
+
+Environment variables take priority over `agent.json`, and empty values count as unset. The identity (`IRL_API_TOKEN`, `IRL_AGENT_ID`, `IRL_MODEL_HASH`) is never mixed: set all three in the environment, or none of them to use the file. The file's token is only sent to the server it was issued for: if `IRL_BASE_URL` points elsewhere, the gateway refuses to start. `agent.json` can't set the broker or exchange keys, so a file on disk never switches the gateway to a live account. On macOS and Linux the gateway refuses an `agent.json` owned by another user or writable by group or others, and warns if it is readable by them (fix either with `chmod 600 ~/.irl-gateway/agent.json`).
 
 The venue IRL sees is the exchange id (`binance`), or `paper-<exchange>` for paper trading, so a mandate can allow paper trading while denying the real account.
 
