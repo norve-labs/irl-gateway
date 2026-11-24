@@ -238,6 +238,8 @@ async def test_ambiguous_venue_outcome_leaves_the_trace_pending(tmp_path, exc):
     assert outcome.status == "unknown"
     assert outcome.to_dict()["status"] == "unknown"
     assert "outcome unknown" in outcome.message
+    assert "Do not retry" in outcome.message
+    assert str(exc) not in outcome.message, "raw exception text must not reach the agent"
     assert irl.bind_calls == [], f"{exc!r} must not be bound as Rejected"
 
 

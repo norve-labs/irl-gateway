@@ -105,7 +105,7 @@ def create_server(gateway: TradeGateway) -> MCPServer:
         Returns status filled | denied | blocked | failed | unknown, plus the
         IRL trace_id and verdict (MATCHED / DIVERGENT) when an order was placed.
         unknown: the venue did not answer (timeout, outage); the order may have
-        executed. Check the venue before retrying.
+        executed. Do not retry; the operator reconciles it.
         """
         request = TradeRequest(
             symbol=symbol,

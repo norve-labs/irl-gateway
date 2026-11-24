@@ -24,7 +24,7 @@ AI agent ── MCP ──> irl-gateway ──> IRL: authorize (policy + sealed 
 
 | Tool | What it does |
 | --- | --- |
-| `execute_trade(symbol, side, rationale, quantity \| notional)` | The only tool that moves money. Spot market order through authorize → place → bind. Returns `filled`, `denied`, `blocked`, `failed` or `unknown` (the venue did not answer: check it before retrying), with the IRL `trace_id` and verdict. |
+| `execute_trade(symbol, side, rationale, quantity \| notional)` | The only tool that moves money. Spot market order through authorize → place → bind. Returns `filled`, `denied`, `blocked`, `failed` or `unknown` (the venue did not answer and the order may have executed: do not retry; the operator reconciles it), with the IRL `trace_id` and verdict. |
 | `get_policy()` | The agent's mandate as IRL enforces it, plus the local kill-switch state. |
 | `get_quote(symbol)` | Last price on the gateway's venue. |
 | `get_balances()` | Free balances (paper or exchange). |

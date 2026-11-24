@@ -251,9 +251,13 @@ class TradeGateway:
                 return replace(
                     trace,
                     status="unknown",
+                    # Only the exception type reaches the agent: network errors can
+                    # carry the signed request URL. The full text is in the log.
                     message=(
-                        f"order outcome unknown ({exc}). Check the venue for client order id "
-                        f"{client_order_id} before retrying; the IRL trace stays PENDING"
+                        f"order outcome unknown ({type(exc).__name__}): the venue did not "
+                        f"confirm or reject client order id {client_order_id}, so it may "
+                        "have executed. Do not retry this trade; tell the operator, who "
+                        "reconciles it with the venue. The IRL trace stays PENDING."
                     ),
                     warnings=warnings,
                 )
