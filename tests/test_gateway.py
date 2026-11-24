@@ -252,3 +252,30 @@ async def test_explicit_exchange_error_is_bound_as_rejected(tmp_path):
 
     assert outcome.status == "failed"
     assert irl.bind_calls[0]["execution_status"] == "Rejected"
+
+
+async def test_paper_price_feed_failure_is_a_definite_rejection(tmp_path):
+    async def failing_prices(symbol: str) -> float:
+        raise ccxt_async.RequestTimeout("binance ticker timed out")
+
+    from irl_gateway.brokers import PaperBroker
+
+    broker = PaperBroker(failing_prices, {"USDT": 1_000.0}, venue_id="paper-binance")
+    _, _, quotes = make_gateway(tmp_path)  # quotes for authorize come from a working broker
+
+    class _Split:
+        """Quotes from a working paper broker, orders through the failing one."""
+
+        def __getattr__(self, name):
+            return getattr(quotes, name)
+
+        async def place_market_order(self, *args, **kwargs):
+            return await broker.place_market_order(*args, **kwargs)
+
+    gateway, irl, _ = make_gateway(tmp_path, broker=_Split())
+
+    outcome = await gateway.execute_trade(_buy())
+
+    assert outcome.status == "failed"
+    assert irl.bind_calls[0]["execution_status"] == "Rejected"
+    assert await broker.get_balances() == {"USDT": 1_000.0}
