@@ -199,3 +199,43 @@ async def test_invalid_requests_are_blocked_without_contacting_irl(tmp_path, ove
     assert outcome.status == "blocked"
     assert fragment in outcome.message
     assert irl.authorize_calls == []
+
+
+class _FailingBroker:
+    """Wraps a broker so placing an order raises the given exception."""
+
+    def __init__(self, inner, exc: Exception):
+        self._inner, self._exc = inner, exc
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    async def place_market_order(self, *args, **kwargs):
+        raise self._exc
+
+
+async def test_ambiguous_venue_error_leaves_the_trace_pending(tmp_path):
+    import ccxt.async_support as ccxt_async
+
+    _, _, paper = make_gateway(tmp_path)
+    broker = _FailingBroker(paper, ccxt_async.RequestTimeout("binance timed out"))
+    gateway, irl, _ = make_gateway(tmp_path, broker=broker)
+
+    outcome = await gateway.execute_trade(_buy())
+
+    assert outcome.status == "unknown"
+    assert "outcome unknown" in outcome.message
+    assert irl.bind_calls == [], "a timeout must not be bound as Rejected"
+
+
+async def test_explicit_exchange_error_is_bound_as_rejected(tmp_path):
+    import ccxt.async_support as ccxt_async
+
+    _, _, paper = make_gateway(tmp_path)
+    broker = _FailingBroker(paper, ccxt_async.InsufficientFunds("binance: insufficient balance"))
+    gateway, irl, _ = make_gateway(tmp_path, broker=broker)
+
+    outcome = await gateway.execute_trade(_buy())
+
+    assert outcome.status == "failed"
+    assert irl.bind_calls[0]["execution_status"] == "Rejected"

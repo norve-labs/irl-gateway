@@ -43,6 +43,21 @@ class Fill:
     fee_asset: str | None
 
 
+def is_definite_rejection(exc: BaseException) -> bool:
+    """True only when the order certainly did not execute.
+
+    The venue answered with an error (ccxt ``ExchangeError``: insufficient
+    funds, invalid order, bad request, ...) or the order never left the
+    process (``ValueError``: local validation, paper balance). Timeouts,
+    outages and empty responses (ccxt ``OperationFailed``, which includes
+    ``NetworkError``) and anything unexpected are ambiguous: the venue may
+    have accepted the order, so it must not be recorded as rejected.
+    """
+    if isinstance(exc, ccxt_async.OperationFailed):
+        return False
+    return isinstance(exc, (ccxt_async.ExchangeError, ValueError))
+
+
 class OrderSizeError(ValueError):
     """The order can't be placed at this size on this venue (step, minimums)."""
 

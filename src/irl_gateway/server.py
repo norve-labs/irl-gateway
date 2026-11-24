@@ -102,8 +102,10 @@ def create_server(gateway: TradeGateway) -> MCPServer:
         symbol: 'BASE/QUOTE', e.g. 'BTC/USDT'. side: 'buy' or 'sell'.
         Give exactly one of quantity (base units) or notional (quote amount).
         rationale: why you are trading; sealed into the audit trace.
-        Returns status filled | denied | blocked | failed, plus the IRL
-        trace_id and verdict (MATCHED / DIVERGENT) when an order was placed.
+        Returns status filled | denied | blocked | failed | unknown, plus the
+        IRL trace_id and verdict (MATCHED / DIVERGENT) when an order was placed.
+        unknown: the venue did not answer (timeout, outage); the order may have
+        executed. Check the venue before retrying.
         """
         request = TradeRequest(
             symbol=symbol,
