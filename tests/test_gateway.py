@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import ccxt.async_support as ccxt_async
 import pytest
 
 from irl_gateway.gateway import FEATURE_SCHEMA_ID, TradeRequest
@@ -214,26 +215,36 @@ class _FailingBroker:
         raise self._exc
 
 
-async def test_ambiguous_venue_error_leaves_the_trace_pending(tmp_path):
-    import ccxt.async_support as ccxt_async
+def _gateway_failing_with(tmp_path, exc: Exception):
+    _, _, paper = make_gateway(tmp_path)  # a paper broker to delegate quotes to
+    gateway, irl, _ = make_gateway(tmp_path, broker=_FailingBroker(paper, exc))
+    return gateway, irl
 
-    _, _, paper = make_gateway(tmp_path)
-    broker = _FailingBroker(paper, ccxt_async.RequestTimeout("binance timed out"))
-    gateway, irl, _ = make_gateway(tmp_path, broker=broker)
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ccxt_async.RequestTimeout("binance timed out"),
+        ccxt_async.DuplicateOrderId("order id exists"),
+        ValueError("could not convert string to float: ''"),  # parsing an accepted order
+        RuntimeError("unexpected"),
+    ],
+)
+async def test_ambiguous_venue_outcome_leaves_the_trace_pending(tmp_path, exc):
+    gateway, irl = _gateway_failing_with(tmp_path, exc)
 
     outcome = await gateway.execute_trade(_buy())
 
     assert outcome.status == "unknown"
+    assert outcome.to_dict()["status"] == "unknown"
     assert "outcome unknown" in outcome.message
-    assert irl.bind_calls == [], "a timeout must not be bound as Rejected"
+    assert irl.bind_calls == [], f"{exc!r} must not be bound as Rejected"
 
 
 async def test_explicit_exchange_error_is_bound_as_rejected(tmp_path):
-    import ccxt.async_support as ccxt_async
-
-    _, _, paper = make_gateway(tmp_path)
-    broker = _FailingBroker(paper, ccxt_async.InsufficientFunds("binance: insufficient balance"))
-    gateway, irl, _ = make_gateway(tmp_path, broker=broker)
+    gateway, irl = _gateway_failing_with(
+        tmp_path, ccxt_async.InsufficientFunds("binance: insufficient balance")
+    )
 
     outcome = await gateway.execute_trade(_buy())
 

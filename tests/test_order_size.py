@@ -101,13 +101,13 @@ async def test_too_small_order_is_blocked_before_irl_is_asked(tmp_path, binance)
 def test_is_definite_rejection_separates_venue_answers_from_ambiguity():
     import ccxt.async_support as ccxt_async
 
-    from irl_gateway.brokers import OrderSizeError, is_definite_rejection
+    from irl_gateway.brokers import LocalOrderRejection, OrderSizeError, is_definite_rejection
 
     for exc in (
         ccxt_async.InsufficientFunds("x"),
         ccxt_async.InvalidOrder("x"),
         ccxt_async.BadRequest("x"),
-        ValueError("insufficient USDT"),
+        LocalOrderRejection("insufficient USDT"),
         OrderSizeError("rounds to zero"),
     ):
         assert is_definite_rejection(exc), exc
@@ -115,7 +115,11 @@ def test_is_definite_rejection_separates_venue_answers_from_ambiguity():
         ccxt_async.RequestTimeout("x"),
         ccxt_async.NetworkError("x"),
         ccxt_async.ExchangeNotAvailable("x"),
+        ccxt_async.DDoSProtection("x"),
+        ccxt_async.InvalidNonce("x"),
         ccxt_async.NullResponse("x"),
+        ccxt_async.DuplicateOrderId("x"),
+        ValueError("could not convert string to float"),
         RuntimeError("unexpected"),
     ):
         assert not is_definite_rejection(exc), exc
