@@ -241,8 +241,14 @@ class PaperBroker(Broker):
     ) -> Fill:
         if quantity <= 0:
             raise LocalOrderRejection("quantity must be positive")
-        base, quote = split_symbol(symbol)
-        mid = await self._price_source(symbol)
+        try:
+            base, quote = split_symbol(symbol)
+            mid = await self._price_source(symbol)
+        except Exception as exc:
+            # A paper order cannot be half-placed: any failure before the balances
+            # move (bad symbol, price feed timeout) means it certainly did not
+            # execute, so it is a definite rejection, not an unknown outcome.
+            raise LocalOrderRejection(f"paper order not placed: {exc}") from exc
         price = mid * (1 + self._slip) if side is Side.BUY else mid * (1 - self._slip)
         gross = quantity * price
         fee = gross * self._fee
