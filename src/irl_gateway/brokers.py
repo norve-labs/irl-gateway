@@ -43,6 +43,31 @@ class Fill:
     fee_asset: str | None
 
 
+def is_definite_rejection(exc: BaseException) -> bool:
+    """True only when the order certainly did not execute.
+
+    Definite: the venue answered with an error (ccxt ``ExchangeError``:
+    insufficient funds, invalid order, bad request, ...), or the order was
+    refused before it left the process (``OrderSizeError``,
+    ``LocalOrderRejection``). Everything else is ambiguous and must not be
+    recorded as rejected, because the venue may have accepted the order:
+    timeouts, outages and empty responses (ccxt ``OperationFailed``, which
+    includes ``NetworkError``); ``DuplicateOrderId`` (an order with this id
+    already exists); a plain ``ValueError`` (it may come from parsing the
+    response of an accepted order); anything unexpected. An unrecognised venue
+    error code that ccxt maps to a plain ``ExchangeError`` is treated as a
+    rejection; that is a residual risk. Keep in sync with
+    trading_bot.execution.broker.is_definite_rejection.
+    """
+    if isinstance(exc, (ccxt_async.OperationFailed, ccxt_async.DuplicateOrderId)):
+        return False
+    return isinstance(exc, (ccxt_async.ExchangeError, OrderSizeError, LocalOrderRejection))
+
+
+class LocalOrderRejection(ValueError):
+    """The order was refused before it left the process (e.g. paper balance)."""
+
+
 class OrderSizeError(ValueError):
     """The order can't be placed at this size on this venue (step, minimums)."""
 
@@ -215,7 +240,7 @@ class PaperBroker(Broker):
         self, symbol: str, side: Side, quantity: float, *, client_order_id: str
     ) -> Fill:
         if quantity <= 0:
-            raise ValueError("quantity must be positive")
+            raise LocalOrderRejection("quantity must be positive")
         base, quote = split_symbol(symbol)
         mid = await self._price_source(symbol)
         price = mid * (1 + self._slip) if side is Side.BUY else mid * (1 - self._slip)
@@ -241,7 +266,9 @@ class PaperBroker(Broker):
     def _debit(self, asset: str, amount: float) -> None:
         available = self._balances.get(asset, 0.0)
         if amount > available + 1e-12:
-            raise ValueError(f"insufficient {asset}: need {amount:.8f}, have {available:.8f}")
+            raise LocalOrderRejection(
+                f"insufficient {asset}: need {amount:.8f}, have {available:.8f}"
+            )
         self._balances[asset] = available - amount
 
     def _credit(self, asset: str, amount: float) -> None:

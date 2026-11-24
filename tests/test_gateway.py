@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import ccxt.async_support as ccxt_async
 import pytest
 
 from irl_gateway.gateway import FEATURE_SCHEMA_ID, TradeRequest
@@ -199,3 +200,55 @@ async def test_invalid_requests_are_blocked_without_contacting_irl(tmp_path, ove
     assert outcome.status == "blocked"
     assert fragment in outcome.message
     assert irl.authorize_calls == []
+
+
+class _FailingBroker:
+    """Wraps a broker so placing an order raises the given exception."""
+
+    def __init__(self, inner, exc: Exception):
+        self._inner, self._exc = inner, exc
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    async def place_market_order(self, *args, **kwargs):
+        raise self._exc
+
+
+def _gateway_failing_with(tmp_path, exc: Exception):
+    _, _, paper = make_gateway(tmp_path)  # a paper broker to delegate quotes to
+    gateway, irl, _ = make_gateway(tmp_path, broker=_FailingBroker(paper, exc))
+    return gateway, irl
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ccxt_async.RequestTimeout("binance timed out"),
+        ccxt_async.DuplicateOrderId("order id exists"),
+        ValueError("could not convert string to float: ''"),  # parsing an accepted order
+        RuntimeError("unexpected"),
+    ],
+)
+async def test_ambiguous_venue_outcome_leaves_the_trace_pending(tmp_path, exc):
+    gateway, irl = _gateway_failing_with(tmp_path, exc)
+
+    outcome = await gateway.execute_trade(_buy())
+
+    assert outcome.status == "unknown"
+    assert outcome.to_dict()["status"] == "unknown"
+    assert "outcome unknown" in outcome.message
+    assert "Do not retry" in outcome.message
+    assert str(exc) not in outcome.message, "raw exception text must not reach the agent"
+    assert irl.bind_calls == [], f"{exc!r} must not be bound as Rejected"
+
+
+async def test_explicit_exchange_error_is_bound_as_rejected(tmp_path):
+    gateway, irl = _gateway_failing_with(
+        tmp_path, ccxt_async.InsufficientFunds("binance: insufficient balance")
+    )
+
+    outcome = await gateway.execute_trade(_buy())
+
+    assert outcome.status == "failed"
+    assert irl.bind_calls[0]["execution_status"] == "Rejected"

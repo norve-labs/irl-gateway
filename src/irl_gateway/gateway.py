@@ -23,7 +23,14 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from irl_gateway.brokers import Broker, Fill, OrderSizeError, Side, split_symbol
+from irl_gateway.brokers import (
+    Broker,
+    Fill,
+    OrderSizeError,
+    Side,
+    is_definite_rejection,
+    split_symbol,
+)
 from irl_gateway.irl import AgentIdentity, IrlClient, IrlDenied, IrlError
 from irl_gateway.journal import CONTEXT_PREFIX, Journal, context_hash
 
@@ -32,7 +39,7 @@ logger = logging.getLogger(__name__)
 FEATURE_SCHEMA_ID = "irl-gateway/1"
 MAX_RATIONALE_CHARS = 20_000
 
-Status = Literal["filled", "denied", "blocked", "failed"]
+Status = Literal["filled", "denied", "blocked", "failed", "unknown"]
 
 
 @dataclass(frozen=True)
@@ -230,8 +237,31 @@ class TradeGateway:
             fill = await self._broker.place_market_order(
                 symbol, side, quantity, client_order_id=client_order_id
             )
-        except Exception as exc:  # noqa: BLE001 - reported to the agent and bound as Rejected
-            logger.warning("order %s failed at the venue: %r", client_order_id, exc)
+        except Exception as exc:  # noqa: BLE001 - classified below and reported to the agent
+            if not is_definite_rejection(exc):
+                # The venue may have executed the order (timeout, outage). Binding
+                # it as Rejected would be final and false, so leave the trace
+                # PENDING for reconciliation via /irl/pending.
+                logger.error(
+                    "order %s outcome unknown at the venue: %r; IRL trace %s left PENDING",
+                    client_order_id,
+                    exc,
+                    auth.trace_id,
+                )
+                return replace(
+                    trace,
+                    status="unknown",
+                    # Only the exception type reaches the agent: network errors can
+                    # carry the signed request URL. The full text is in the log.
+                    message=(
+                        f"order outcome unknown ({type(exc).__name__}): the venue did not "
+                        f"confirm or reject client order id {client_order_id}, so it may "
+                        "have executed. Do not retry this trade; tell the operator, who "
+                        "reconciles it with the venue. The IRL trace stays PENDING."
+                    ),
+                    warnings=warnings,
+                )
+            logger.warning("order %s rejected by the venue: %r", client_order_id, exc)
             verdict, _, bind_error = await self._bind(auth.trace_id, client_order_id, None)
             return replace(
                 trace,
