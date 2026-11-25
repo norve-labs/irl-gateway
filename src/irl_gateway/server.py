@@ -144,7 +144,8 @@ def create_server(gateway: TradeGateway) -> MCPServer:
         try:
             profile = await gateway.irl.get_agent(gateway.agent.agent_id)
         except IrlError as exc:
-            return {"error": str(exc)}
+            logger.warning("IRL call failed: %s", exc)
+            return {"error": exc.for_agent()}
         keys = ("status", "max_notional", "allowed_assets", "allowed_venues", "allowed_regimes")
         return {
             "agent_id": gateway.agent.agent_id,
@@ -159,7 +160,8 @@ def create_server(gateway: TradeGateway) -> MCPServer:
         try:
             return await gateway.irl.get_trace(trace_id)
         except IrlError as exc:
-            return {"error": str(exc)}
+            logger.warning("IRL call failed: %s", exc)
+            return {"error": exc.for_agent()}
 
     @server.tool(annotations=ToolAnnotations(read_only_hint=True))
     async def list_recent_trades(limit: int = 20) -> dict[str, Any]:

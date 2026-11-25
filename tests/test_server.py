@@ -239,3 +239,24 @@ async def test_read_tools_do_not_pass_venue_text_to_the_agent(
     result = await _call(create_server(gateway), tool, args)
 
     assert result == {"error": expected}
+
+
+async def test_irl_read_tools_return_only_code_and_status(tmp_path):
+    from irl_gateway.irl import IrlUnavailable
+
+    from .fakes import FakeIrl
+
+    class _FailingIrl(FakeIrl):
+        async def get_agent(self, agent_id):
+            raise IrlUnavailable(502, "BAD_GATEWAY", "<html>upstream body</html>")
+
+        async def get_trace(self, trace_id):
+            raise IrlUnavailable(502, "BAD_GATEWAY", "<html>upstream body</html>")
+
+    gateway, _, _ = make_gateway(tmp_path, _FailingIrl())
+    server = create_server(gateway)
+
+    assert await _call(server, "get_policy") == {"error": "[BAD_GATEWAY] (HTTP 502)"}
+    assert await _call(server, "get_trace", {"trace_id": "t"}) == {
+        "error": "[BAD_GATEWAY] (HTTP 502)"
+    }

@@ -9,12 +9,16 @@ Error mapping is what lets the gateway fail closed:
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
+
+_SAFE_CODE = re.compile(r"[A-Z0-9_]{1,64}")
+_DENIAL_MESSAGE_MAX = 300
 
 
 class IrlError(Exception):
@@ -23,6 +27,26 @@ class IrlError(Exception):
         self.status = status
         self.code = code
         self.message = message
+
+    @property
+    def safe_code(self) -> str:
+        """The error code if it looks like one IRL emits, else UNKNOWN."""
+        return self.code if _SAFE_CODE.fullmatch(self.code) else "UNKNOWN"
+
+    def for_agent(self) -> str:
+        """What the agent may see: code and HTTP status. The message comes from
+        the response body (or a transport error with the URL), so it stays in
+        the gateway log."""
+        return f"[{self.safe_code}] (HTTP {self.status})"
+
+
+def denial_reason(exc: IrlError) -> str:
+    """IRL's explanation of a policy refusal, which the agent needs to adjust
+    the trade: single line, printable characters only, bounded length."""
+    text = "".join(c if c.isprintable() else " " for c in exc.message).strip()
+    if len(text) > _DENIAL_MESSAGE_MAX:
+        text = text[: _DENIAL_MESSAGE_MAX - 1] + "…"
+    return text
 
 
 class IrlDenied(IrlError):
