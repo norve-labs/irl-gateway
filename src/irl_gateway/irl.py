@@ -19,7 +19,8 @@ import aiohttp
 
 _SAFE_CODE = re.compile(r"[A-Z0-9_]{1,64}")
 _DENIAL_MESSAGE_MAX = 300
-# irl-engine policy refusals (src/errors.rs, PolicyError): fixed templates that
+# irl-engine policy refusals (src/errors.rs, PolicyError, as of irl-engine e0a3fc2;
+# update this set when the engine adds one): fixed templates that
 # only interpolate values the agent already knows. Any other 403, e.g. from a
 # proxy in front of IRL, carries text the agent must not read.
 _POLICY_DENIAL_CODES = frozenset(
