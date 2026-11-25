@@ -210,3 +210,32 @@ def test_server_starts_from_agent_json_alone(tmp_path, monkeypatch, capsys):
     assert seen[0].irl_api_token == "tok-file" and seen[0].agent_id == AGENT_ID
     assert ran == ["stdio"]
     assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize(
+    ("tool", "args", "method", "expected"),
+    [
+        (
+            "get_quote",
+            {"symbol": "BTC/USDT"},
+            "get_price",
+            "could not price BTC/USDT (ExchangeError)",
+        ),
+        ("get_balances", {}, "get_balances", "could not read balances (ExchangeError)"),
+    ],
+)
+async def test_read_tools_do_not_pass_venue_text_to_the_agent(
+    tmp_path, tool, args, method, expected
+):
+    import ccxt.async_support as ccxt_async
+
+    from .test_gateway import _VENUE_BODY, _BrokerRaisingOn
+
+    _, _, paper = make_gateway(tmp_path)
+    gateway, _, _ = make_gateway(
+        tmp_path, broker=_BrokerRaisingOn(paper, method, ccxt_async.ExchangeError(_VENUE_BODY))
+    )
+
+    result = await _call(create_server(gateway), tool, args)
+
+    assert result == {"error": expected}

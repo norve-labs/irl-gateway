@@ -26,6 +26,7 @@ from typing import Any, Literal
 from irl_gateway.brokers import (
     Broker,
     Fill,
+    LocalOrderRejection,
     OrderSizeError,
     Side,
     is_definite_rejection,
@@ -133,7 +134,9 @@ class TradeGateway:
         except Exception as exc:  # noqa: BLE001 - any venue error blocks the trade
             logger.warning("price lookup failed for %s: %r", request.symbol, exc)
             return TradeOutcome(
-                "blocked", f"could not price {request.symbol}: {exc}", client_order_id
+                "blocked",
+                f"could not price {request.symbol} ({type(exc).__name__})",
+                client_order_id,
             )
         try:
             # Round to what the venue accepts BEFORE sealing, so the sealed
@@ -146,7 +149,9 @@ class TradeGateway:
         except Exception as exc:  # noqa: BLE001 - venue metadata errors block the trade
             logger.warning("market rules lookup failed for %s: %r", request.symbol, exc)
             return TradeOutcome(
-                "blocked", f"could not load {request.symbol} market rules: {exc}", client_order_id
+                "blocked",
+                f"could not load {request.symbol} market rules ({type(exc).__name__})",
+                client_order_id,
             )
         notional = quantity * price
         _, quote = split_symbol(request.symbol)
@@ -266,7 +271,7 @@ class TradeGateway:
             return replace(
                 trace,
                 status="failed",
-                message=f"venue rejected the order: {exc}",
+                message=f"venue rejected the order: {_rejection_reason(exc)}",
                 verdict=verdict,
                 bind_error=bind_error,
                 warnings=warnings,
@@ -304,6 +309,19 @@ class TradeGateway:
             logger.error("IRL bind failed for trace %s: %s", trace_id, exc)
             return None, None, str(exc)
         return result.verification_status, result.final_proof, None
+
+
+def _rejection_reason(exc: Exception) -> str:
+    """What the agent may see about a definite rejection.
+
+    The gateway's own refusals (order size, paper balance) are worded here and
+    safe to show. A venue error carries the venue's response body (account
+    details, free text the agent would read as instructions), so the agent
+    only gets the exception type; the full error is in the gateway log.
+    """
+    if isinstance(exc, (LocalOrderRejection, OrderSizeError)):
+        return str(exc)
+    return type(exc).__name__
 
 
 def _validate(request: TradeRequest) -> str | None:
