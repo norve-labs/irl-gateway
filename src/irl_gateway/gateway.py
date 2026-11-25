@@ -134,7 +134,9 @@ class TradeGateway:
         except Exception as exc:  # noqa: BLE001 - any venue error blocks the trade
             logger.warning("price lookup failed for %s: %r", request.symbol, exc)
             return TradeOutcome(
-                "blocked", f"could not price {request.symbol}: {exc}", client_order_id
+                "blocked",
+                f"could not price {request.symbol} ({type(exc).__name__})",
+                client_order_id,
             )
         try:
             # Round to what the venue accepts BEFORE sealing, so the sealed
@@ -147,7 +149,9 @@ class TradeGateway:
         except Exception as exc:  # noqa: BLE001 - venue metadata errors block the trade
             logger.warning("market rules lookup failed for %s: %r", request.symbol, exc)
             return TradeOutcome(
-                "blocked", f"could not load {request.symbol} market rules: {exc}", client_order_id
+                "blocked",
+                f"could not load {request.symbol} market rules ({type(exc).__name__})",
+                client_order_id,
             )
         notional = quantity * price
         _, quote = split_symbol(request.symbol)
@@ -307,7 +311,7 @@ class TradeGateway:
         return result.verification_status, result.final_proof, None
 
 
-def _rejection_reason(exc: BaseException) -> str:
+def _rejection_reason(exc: Exception) -> str:
     """What the agent may see about a definite rejection.
 
     The gateway's own refusals (order size, paper balance) are worded here and

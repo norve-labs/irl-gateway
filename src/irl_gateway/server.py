@@ -120,15 +120,22 @@ def create_server(gateway: TradeGateway) -> MCPServer:
     @server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     async def get_quote(symbol: str) -> dict[str, Any]:
         """Last traded price for a 'BASE/QUOTE' symbol on the gateway's venue."""
-        return {"symbol": symbol, "price": await gateway.broker.get_price(symbol)}
+        try:
+            price = await gateway.broker.get_price(symbol)
+        except Exception as exc:  # noqa: BLE001 - venue text must not reach the agent
+            logger.warning("get_quote failed for %s: %r", symbol, exc)
+            return {"error": f"could not price {symbol} ({type(exc).__name__})"}
+        return {"symbol": symbol, "price": price}
 
     @server.tool(annotations=ToolAnnotations(read_only_hint=True))
     async def get_balances() -> dict[str, Any]:
         """Free balances on the gateway's account (paper or exchange)."""
-        return {
-            "venue_id": gateway.broker.venue_id,
-            "balances": await gateway.broker.get_balances(),
-        }
+        try:
+            balances = await gateway.broker.get_balances()
+        except Exception as exc:  # noqa: BLE001 - venue text must not reach the agent
+            logger.warning("get_balances failed: %r", exc)
+            return {"error": f"could not read balances ({type(exc).__name__})"}
+        return {"venue_id": gateway.broker.venue_id, "balances": balances}
 
     @server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     async def get_policy() -> dict[str, Any]:
