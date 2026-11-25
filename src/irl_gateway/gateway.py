@@ -32,7 +32,7 @@ from irl_gateway.brokers import (
     is_definite_rejection,
     split_symbol,
 )
-from irl_gateway.irl import AgentIdentity, IrlClient, IrlDenied, IrlError
+from irl_gateway.irl import AgentIdentity, IrlClient, IrlDenied, IrlError, denial_reason
 from irl_gateway.journal import CONTEXT_PREFIX, Journal, context_hash
 
 logger = logging.getLogger(__name__)
@@ -213,15 +213,16 @@ class TradeGateway:
         except IrlDenied as exc:
             return TradeOutcome(
                 "denied",
-                f"IRL denied: {exc.message}",
+                f"IRL denied: {denial_reason(exc)}",
                 client_order_id,
                 context_sha256=ctx_hash,
-                denial_code=exc.code,
+                denial_code=exc.safe_code,
             )
         except IrlError as exc:
+            logger.warning("IRL authorize failed for %s: %r", client_order_id, exc)
             return TradeOutcome(
                 "blocked",
-                f"IRL unavailable, no order sent: {exc}",
+                f"IRL unavailable, no order sent: {exc.for_agent()}",
                 client_order_id,
                 context_sha256=ctx_hash,
             )
@@ -306,8 +307,8 @@ class TradeGateway:
                 asset=fill.symbol if fill else None,
             )
         except IrlError as exc:
-            logger.error("IRL bind failed for trace %s: %s", trace_id, exc)
-            return None, None, str(exc)
+            logger.error("IRL bind failed for trace %s: %r", trace_id, exc)
+            return None, None, exc.for_agent()
         return result.verification_status, result.final_proof, None
 
 
