@@ -14,9 +14,10 @@ from irl_gateway import __version__
 from irl_gateway import server as server_module
 from irl_gateway.brokers import PaperBroker
 from irl_gateway.config import Settings, load_settings
+from irl_gateway.irl import IrlUnavailable
 from irl_gateway.server import build_gateway, create_server
 
-from .fakes import AGENT_ID, MODEL_HASH, make_gateway
+from .fakes import AGENT_ID, MODEL_HASH, FakeIrl, make_gateway
 
 
 async def _call(server, name: str, args: dict | None = None) -> dict:
@@ -241,18 +242,15 @@ async def test_read_tools_do_not_pass_venue_text_to_the_agent(
     assert result == {"error": expected}
 
 
+class _FailingIrl(FakeIrl):
+    async def get_agent(self, agent_id):
+        raise IrlUnavailable(502, "BAD_GATEWAY", "<html>upstream body</html>")
+
+    async def get_trace(self, trace_id):
+        raise IrlUnavailable(502, "BAD_GATEWAY", "<html>upstream body</html>")
+
+
 async def test_irl_read_tools_return_only_code_and_status(tmp_path):
-    from irl_gateway.irl import IrlUnavailable
-
-    from .fakes import FakeIrl
-
-    class _FailingIrl(FakeIrl):
-        async def get_agent(self, agent_id):
-            raise IrlUnavailable(502, "BAD_GATEWAY", "<html>upstream body</html>")
-
-        async def get_trace(self, trace_id):
-            raise IrlUnavailable(502, "BAD_GATEWAY", "<html>upstream body</html>")
-
     gateway, _, _ = make_gateway(tmp_path, _FailingIrl())
     server = create_server(gateway)
 

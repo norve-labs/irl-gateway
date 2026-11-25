@@ -19,6 +19,23 @@ import aiohttp
 
 _SAFE_CODE = re.compile(r"[A-Z0-9_]{1,64}")
 _DENIAL_MESSAGE_MAX = 300
+# irl-engine policy refusals (src/errors.rs, PolicyError): fixed templates that
+# only interpolate values the agent already knows. Any other 403, e.g. from a
+# proxy in front of IRL, carries text the agent must not read.
+_POLICY_DENIAL_CODES = frozenset(
+    {
+        "AGENT_NOT_ACTIVE",
+        "AGENT_NOT_FOUND",
+        "ASSET_UNAUTHORIZED",
+        "MODEL_HASH_MISMATCH",
+        "MTA_PUBKEY_UNAUTHORIZED",
+        "NOTIONAL_EXCEEDS_LIMIT",
+        "PAPER_TIER_ONLY",
+        "REGIME_UNAUTHORIZED",
+        "REGIME_VIOLATION",
+        "VENUE_UNAUTHORIZED",
+    }
+)
 
 
 class IrlError(Exception):
@@ -39,10 +56,18 @@ class IrlError(Exception):
         the gateway log."""
         return f"[{self.safe_code}] (HTTP {self.status})"
 
+    def __str__(self) -> str:
+        # Safe by default: str() is what ends up in messages. The full text is
+        # in repr() (the exception args) and in .message, for logs.
+        return self.for_agent()
+
 
 def denial_reason(exc: IrlError) -> str:
     """IRL's explanation of a policy refusal, which the agent needs to adjust
-    the trade: single line, printable characters only, bounded length."""
+    the trade: single line, printable characters only, bounded length. Only
+    for irl-engine's policy codes; anything else gets the code and status."""
+    if exc.safe_code not in _POLICY_DENIAL_CODES:
+        return exc.for_agent()
     text = "".join(c if c.isprintable() else " " for c in exc.message).strip()
     if len(text) > _DENIAL_MESSAGE_MAX:
         text = text[: _DENIAL_MESSAGE_MAX - 1] + "…"

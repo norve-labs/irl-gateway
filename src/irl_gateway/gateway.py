@@ -219,6 +219,7 @@ class TradeGateway:
                 denial_code=exc.safe_code,
             )
         except IrlError as exc:
+            logger.warning("IRL authorize failed for %s: %r", client_order_id, exc)
             return TradeOutcome(
                 "blocked",
                 f"IRL unavailable, no order sent: {exc.for_agent()}",
@@ -306,7 +307,7 @@ class TradeGateway:
                 asset=fill.symbol if fill else None,
             )
         except IrlError as exc:
-            logger.error("IRL bind failed for trace %s: %s", trace_id, exc)
+            logger.error("IRL bind failed for trace %s: %r", trace_id, exc)
             return None, None, exc.for_agent()
         return result.verification_status, result.final_proof, None
 
