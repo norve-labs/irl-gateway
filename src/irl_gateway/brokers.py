@@ -248,7 +248,9 @@ class PaperBroker(Broker):
             # A paper order cannot be half-placed: any failure before the balances
             # move (bad symbol, price feed timeout) means it certainly did not
             # execute, so it is a definite rejection, not an unknown outcome.
-            raise LocalOrderRejection(f"paper order not placed: {exc}") from exc
+            # Only the exception type reaches the agent: feed errors carry URLs and
+            # library text (the full error stays chained and in the gateway log).
+            raise LocalOrderRejection(f"paper order not placed ({type(exc).__name__})") from exc
         price = mid * (1 + self._slip) if side is Side.BUY else mid * (1 - self._slip)
         gross = quantity * price
         fee = gross * self._fee

@@ -279,3 +279,5 @@ async def test_paper_price_feed_failure_is_a_definite_rejection(tmp_path):
     assert outcome.status == "failed"
     assert irl.bind_calls[0]["execution_status"] == "Rejected"
     assert await broker.get_balances() == {"USDT": 1_000.0}
+    assert "binance ticker timed out" not in (outcome.message or "")
+    assert "RequestTimeout" in (outcome.message or "")
